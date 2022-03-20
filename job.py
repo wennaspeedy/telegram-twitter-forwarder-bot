@@ -10,6 +10,7 @@ from telegram.error import TelegramError
 from telegram.ext import Job
 
 from models import TwitterUser, Tweet, Subscription, db, TelegramChat
+tweetpass = {}
 
 INFO_CLEANUP = {
     'NOTFOUND': "Your subscription to @{} was removed because that profile doesn't exist anymore. Maybe the account's name changed?",
@@ -58,16 +59,14 @@ class FetchAndSendTweetsJob(Job):
             try:
                 if tw_user.last_tweet_id == 0:
                     # get just the latest tweet
-                    self.logger.debug(
-                        "Fetching latest tweet by {}".format(tw_user.screen_name))
+                    #self.logger.debug("Fetching latest tweet by {}".format(tw_user.screen_name))
                     tweets = bot.tw.user_timeline(
                         screen_name=tw_user.screen_name,
                         count=1,
                         tweet_mode='extended')
                 else:
                     # get the fresh tweets
-                    self.logger.debug(
-                        "Fetching new tweets from {}".format(tw_user.screen_name))
+                    #self.logger.debug("Fetching new tweets from {}".format(tw_user.screen_name))
                     tweets = bot.tw.user_timeline(
                         screen_name=tw_user.screen_name,
                         since_id=tw_user.last_tweet_id,
@@ -94,7 +93,7 @@ class FetchAndSendTweetsJob(Job):
                 continue
 
             for tweet in tweets:
-                self.logger.debug("- Got tweet: {}".format(tweet.full_text))
+                self.logger.debug("@{} - Got tweet: {}".format(tw_user.screen_name,tweet.full_text))
 
                 # Check if tweet contains media, else check if it contains a link to an image
                 extensions = ('.jpg', '.jpeg', '.png', '.gif')
@@ -125,12 +124,53 @@ class FetchAndSendTweetsJob(Job):
                     'twitter_user': tw_user,
                     'photo_url': photo_url,
                 }
+                tweetpass[tweet.id]=False
+                tweet_rows.append(tw_data)
+
                 try:
                     t = Tweet.get(Tweet.tw_id == tweet.id)
                     self.logger.warning("Got duplicated tw_id on this tweet:")
                     self.logger.warning(str(tw_data))
+
+
                 except Tweet.DoesNotExist:
-                    tweet_rows.append(tw_data)
+                   
+                    #print(tweet.in_reply_to_status_id)
+#moje                    #print(tweet)
+                    canTweet = False
+
+                    """if tweet.is_quote_status:
+                        print("Quote")"""
+                        
+                    try:
+                        if tweet.retweeted_status:
+                            print("FALSE: retweeted")
+                            canTweet = False
+                            
+                    except:
+                        print("TRUE: no Retweet")
+                        canTweet = True
+                    
+                       
+                    if tweet.retweeted:
+                        print("FALSE: Retweeted flag")
+                        canTweet = True if canTweet == False else False
+
+                    if tweet.in_reply_to_status_id is not None:
+                        print("FALSE: It is reply...")
+                        canTweet = False
+                        
+                    if canTweet is True:
+                       tweetpass[tweet.id]=True
+                       print("Tweet is TRUE - will be send...")
+                    else:
+                        tweetpass[tweet.id]=False
+                        print("Tweet is FALSE - will be NOT send...")
+                    
+
+                   
+                    #else:
+                     #   tweet_rows.append(tw_data)
 
                 if len(tweet_rows) >= self.TWEET_BATCH_INSERT_COUNT:
                     Tweet.insert_many(tweet_rows).execute()
@@ -148,10 +188,11 @@ class FetchAndSendTweetsJob(Job):
         # send the new tweets to subscribers
         subscriptions = list(Subscription.select()
                              .where(Subscription.tw_user << updated_tw_users))
+        self.logger.debug("Checking subscriptions...")
+
         for s in subscriptions:
             # are there new tweets? send em all!
-            self.logger.debug(
-                "Checking subscription {} {}".format(s.tg_chat.chat_id, s.tw_user.screen_name))
+            # self.logger.debug("Checking subscription {} {}".format(s.tg_chat.chat_id, s.tw_user.screen_name))
 
             if s.last_tweet_id == 0:  # didn't receive any tweet yet
                 try:
@@ -176,14 +217,24 @@ class FetchAndSendTweetsJob(Job):
                                     .where(Tweet.tw_id > s.last_tweet_id)
                                     .order_by(Tweet.tw_id.asc())
                            ):
-                    bot.send_tweet(s.tg_chat, tw)
-
+                    print("New Tweets in the Pipeline:\n", tweetpass)
+ 
+                    if tweetpass.get(tw.tw_id) == True:
+                        print("Tweet will send to chat.")
+                        bot.send_tweet(s.tg_chat, tw)
+                        del tweetpass[tw.tw_id]
+                        
+                    elif tweetpass.get(tw.tw_id) == False:
+                        print("Tweet will filtered before sending")
+                        del tweetpass[tw.tw_id]
+ 
+                    print("Next tweets in Pipeline:\n", tweetpass)
                 # save the latest tweet sent on this subscription
                 s.last_tweet_id = s.tw_user.last_tweet_id
                 s.save()
                 continue
 
-            self.logger.debug("- No new tweets here.")
+            #self.logger.debug("- No new tweets here.")
 
 
         self.logger.debug("Starting tw_user cleanup")
